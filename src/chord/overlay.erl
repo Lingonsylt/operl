@@ -224,7 +224,7 @@ stabilize(Pred, Id, Successor) ->
       end
   end.
 
-% En nod har berättat att den är vår nya Predecessor. Om den verkligen är det, sätt den till vår
+% En annan nod har berättat att den är vår nya Predecessor. Om den verkligen är det, sätt den till vår
 % Predecessor och ge den den del av vår Store som nu är dess ansvar, baserat på bådas Key
 notify({Nkey, Npid}, Id, Predecessor, Store) ->
   case Predecessor of
