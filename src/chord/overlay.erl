@@ -106,19 +106,18 @@ node(Id, Predecessor, Successor, Store) ->
   end.
 
 % Dela vår Store vid Nkey, och skicka ena halvan till Npid. Behåll resten själv
-handover(Store, Nkey, Npid) ->
-  {Leave, Keep} = storage:split(Nkey, Store),
-  Npid ! {handover, Leave},
+handover(Store, Nkey, Npid, Id) ->
+  {Give, Keep} = storage:split(Nkey, Store),
+  Npid ! {handover, Give},
   Keep.
 
 % Lägg sätt Key till Value. Om Key inte finns på vår nod, routa meddleandet vidare
 add(Key, Value, Qref, Client, Id, Predecessor, {_, Spid}, Store) ->
   case Predecessor of
-    % Om vi inte har någon Predecessor är vi den första noden i ringen - lägg till lokalt
+    % TODO: Skriv comment
     nil ->
-      Store2 = storage:add(Key, Value, Store),
-      Client ! {Qref, ok},
-      Store2;
+      Spid ! {set_key, Key, Value, Qref, Client},
+      Store;
 
     % Om Key är mellan vår Key och vår Predecessors Key är det vårt ansvar. Lägg till den lokalt
     % Om den inte är det, routa vidare till vår Successor.
@@ -126,10 +125,10 @@ add(Key, Value, Qref, Client, Id, Predecessor, {_, Spid}, Store) ->
       case key:between(Key, Pkey, Id) of
         true ->
           Store2 = storage:add(Key, Value, Store),
-          Client ! {Qref, ok},
+          Client ! {Qref, ok, Id},
           Store2;
         false ->
-          Spid ! {add, Key, Value, Qref, Client},
+          Spid ! {set_key, Key, Value, Qref, Client},
           Store
       end
   end.
@@ -141,19 +140,20 @@ lookup(Key, Qref, Client, Id, Predecessor, Successor, Store) ->
     % Om vi inte har någon Predecessor är vi den första noden i ringen - lägg till lokalt
     nil ->
       Result = storage:lookup(Key, Store),
-      Client ! {Qref, Result};
+      Client ! {Qref, Result, Id};
     {Pkey, _} ->
 
       % Om Key är mellan vår Key och vår Predecessors Key är det vårt ansvar. Hämta den från
       % den lokala Store:en
       % Om den inte är det, routa vidare till vår Successor.
+
       case key:between(Key, Pkey, Id) of
         true ->
           Result = storage:lookup(Key, Store),
-          Client ! {Qref, Result};
+          Client ! {Qref, Result, Id};
         false ->
           {_, Spid} = Successor,
-          Spid ! {lookup, Key, Qref, Client}
+          Spid ! {get_key, Key, Qref, Client}
       end
     end.
 
@@ -224,7 +224,7 @@ stabilize(Pred, Id, Successor) ->
       end
   end.
 
-% En har berättat att den är vår nya Predecessor. Om den verkligen är det, sätt den till vår
+% En nod har berättat att den är vår nya Predecessor. Om den verkligen är det, sätt den till vår
 % Predecessor och ge den den del av vår Store som nu är dess ansvar, baserat på bådas Key
 notify({Nkey, Npid}, Id, Predecessor, Store) ->
   case Predecessor of
@@ -232,7 +232,7 @@ notify({Nkey, Npid}, Id, Predecessor, Store) ->
     % vår Store och sätt Predecessor till den nya: {Nkey, Npid}
     nil ->
       % io:format("~p: updating predecessor ~p (nil)~n", [Id, {Nkey, Npid}]),
-      Keep = handover(Store, Nkey, Npid),
+      Keep = handover(Store, Nkey, Npid, Id),
       {{Nkey, Npid}, Keep};
     {Pkey, _} ->
       % Om Nkey är mellan vår aktuella Predecessor och oss, då ska den bli vår nya predecessor.
@@ -240,7 +240,7 @@ notify({Nkey, Npid}, Id, Predecessor, Store) ->
       case key:between(Nkey, Pkey, Id) of
         true ->
           % io:format("~p: updating predecessor ~p (~p in between ~p and ~p)~n", [Id, {Nkey, Npid}, Nkey, Pkey, Id]),
-          Keep = handover(Store, Nkey, Npid),
+          Keep = handover(Store, Nkey, Npid, Id),
           {{Nkey, Npid}, Keep};
         false ->
           % io:format("~p: not updating predecessor ~p~n", [Id, {Nkey, Npid}]),
@@ -263,8 +263,8 @@ set_key(Node, Key, Value) ->
     Qref = make_ref(), % Skapa ett unikt ID på vår request, så att vi kan skriva ut rätt svar när det kommer
     Node ! {set_key, Key, Value, Qref, self()}, % Be Node att sätta Key till Value, och skicka svaret till oss (till self())
     receive % Vänta på svaret och skriv ut det när det kommer
-      {Qref, ok} ->
-        io:format("Added (~p,~p) to ~p~n", [Key, Value, Node])
+      {Qref, ok, NKey} ->
+        io:format("Added (~p,~p) to ~p~n", [Key, Value, NKey])
     end
   end).
 
@@ -274,13 +274,14 @@ get_key(Node, Key) ->
     Qref = make_ref(), % Skapa ett unikt ID på vår request, så att vi kan skriva ut rätt svar när det kommer
     Node ! {get_key, Key, Qref, self()},
     receive % Vänta på svaret och skriv ut det när det kommer
-      {Qref, Result} ->
-        io:format("Lookup for ~p on ~p: ~p~n", [Key, Node, Result])
+      {Qref, Result, Nkey} ->
+        io:format("Lookup for ~p on ~p: ~p~n", [Key, Nkey, Result])
     end
   end).
 
 test() ->
-  % random:seed(erlang:now()),
+  random:seed(erlang:now()),                             % Se till så att randomgeneratorn ger unik random för varje körning
+  TimeScale = 1,
   Key1 = key:generate(),
   Key2 = key:generate(),
   Key3 = key:generate(),
@@ -290,15 +291,21 @@ test() ->
   set_key(Node2, Key1, msg1),
   Node3 = start(key:generate(), Node2),
   spawn(fun() -> send_probe(Node1) end),
-  timer:sleep(1000),
+  timer:sleep(1000 * TimeScale),
   Node4 = start(key:generate(), Node1),
   set_key(Node3, Key2, msg2),
   Node5 = start(key:generate(), Node3),
   set_key(Node1, Key3, msg3),
-  timer:sleep(1000),
+  timer:sleep(1000 * TimeScale),
   set_key(Node5, Key4, msg4),
-  timer:sleep(2500),
+  timer:sleep(2500 * TimeScale),
   get_key(Node5, Key1),
   get_key(Node3, Key2),
   get_key(Node4, Key3),
-  get_key(Node5, Key4).
+  get_key(Node5, Key4),
+  timer:sleep(10000 * TimeScale),
+  get_key(Node5, Key1),
+  get_key(Node3, Key2),
+  get_key(Node4, Key3),
+  get_key(Node5, Key4),
+  timer:sleep(2000 * TimeScale).
