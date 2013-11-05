@@ -1,10 +1,14 @@
 -module(pingpong).
 
--export([start_ping/1, start_pong/0,  ping/2, pong/0]).
+-export([start_ping/1, start_pong/0,  ping/2, pong/0, test/0]).
+
+test() ->
+  start_pong(),
+  start_ping(node()).
 
 ping(0, Pong_Node) ->
   {pong, Pong_Node} ! finished,
-  io:format("ping finished~n", []);
+  io:format("Ping finished~n", []);
 
 ping(N, Pong_Node) ->
   {pong, Pong_Node} ! {ping, self()},
@@ -25,7 +29,7 @@ pong() ->
   end.
 
 start_pong() ->
-  register(pong, spawn(tut17, pong, [])).
+  register(pong, spawn(pingpong, pong, [])).
 
 start_ping(Pong_Node) ->
-  spawn(tut17, ping, [3, Pong_Node]).
+  spawn(pingpong, ping, [3, Pong_Node]).
