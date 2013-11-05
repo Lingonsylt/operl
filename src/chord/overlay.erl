@@ -1,7 +1,7 @@
 -module(overlay).
 -define(Timeout, 500).
 -define(Stabilize, 500).
-
+-define(TimeScale, 0.3).
 -export([start/1, start/2, test/0, set_key/3, get_key/2]).
 
 % Starta den första noden i ringen
@@ -54,21 +54,19 @@ node(Id, Predecessor, Successor, Store) ->
     % Vår Predecessor vill veta vilken vår Predecessor är
     % Svara med Predecessor == nil ? nil : Predecessor.
     {request, Peer} ->
-      % io:format("~p: got request for predecessor: ~p~n", [Id, Predecessor]),
-      request(Peer, Predecessor),                             % request/2 är helt onödig och ska tast bort!
+      Peer ! {status, Predecessor},
       node(Id, Predecessor, Successor, Store);
 
-    % Our successor informs us about its predecessor
     % Vår Successor informerar oss om vem dess Predecessor är
-    {status, Pred} ->
-      % io:format("~p: response with current predecessor: ~p~n", [Id, Pred]),
-      Succ = stabilize(Pred, Id, Successor),
+    {status, SuccPred} ->
+      Succ = stabilize(SuccPred, Id, Successor),
       node(Id, Predecessor, Succ, Store);
 
     % Run stabilization
     stabilize ->
-      Succ = stabilize(Successor), % of
-      node(Id, Predecessor, Succ, Store);
+      {_, Spid}  = Successor,
+      Spid ! {request, self()},
+      node(Id, Predecessor, Successor, Store);
 
     % Sätt en Key till Value, på rätt nod. Kommer routas vidare om den inte är till oss.
     {set_key, Key, Value, Qref, Client} ->
@@ -81,13 +79,33 @@ node(Id, Predecessor, Successor, Store) ->
       node(Id, Predecessor, Successor, Store);
 
     % Ta en del av en annan nods Store, delad på vår Key
+    % Om vi får nycklar som inte ska till oss, passa dem vidare bakåt i ringen
+    % Om vår predecessor är nil, skicka meddelandet till oss själva med 100 ms delay, så att vi kan ta hand om det senare
     {handover, Elements} ->
-      Merged = storage:merge(Store, Elements),
+      Merged = case Predecessor of
+        {Pkey, Ppid} ->
+          % Om vi har en predecessor, merge:a in de element som har med oss att göra in i vår Store
+          storage:merge(case storage:split(Pkey, Id, Elements) of
+              {[], Elements2} ->
+                Elements2;
+              % Om det kommer element som inte vi har ansvar för, passa dom vidare bakåt i ringen
+              {NotOurElements, Elements2} ->
+                spawn(fun() -> timer:sleep(round(100 * ?TimeScale)), Ppid ! {handover, NotOurElements} end),
+                Elements2
+            end, Store);
+        nil when Elements == [] ->
+          Store;
+        % Om vi inte har någon predecessor, skjut upp det hela 100 ms, så tar vi hand om det senare
+        nil ->
+          Self = self(),
+          spawn(fun() -> timer:sleep(round(100 * ?TimeScale)), Self ! {handover, Elements} end),
+          Store
+      end,
       node(Id, Predecessor, Successor, Merged);
 
     % Skicka iväg en probe, som tar ett varv i ringen och samlar information
     probe ->
-      create_probe(Id, Successor),
+      create_probe(Id, Successor, Predecessor, Store),
       node(Id, Predecessor, Successor, Store);
 
     % Ta emot en probe som gått hela varvet och printa ut resultaten
@@ -97,7 +115,7 @@ node(Id, Predecessor, Successor, Store) ->
 
     % Ta emot en probe, och skicka vidare den med vår info inkluderad
     {probe, Ref, Nodes, T} ->
-      forward_probe(Ref, T, Nodes, Id, Successor),
+      forward_probe(Ref, T, Nodes, Id, Successor, Predecessor, Store),
       node(Id, Predecessor, Successor, Store);
 
     % Debugga ut att ett inkommet meddelande inte matchar något vi förväntar oss
@@ -107,17 +125,20 @@ node(Id, Predecessor, Successor, Store) ->
 
 % Dela vår Store vid Nkey, och skicka ena halvan till Npid. Behåll resten själv
 handover(Store, Nkey, Npid, Id) ->
-  {Give, Keep} = storage:split(Nkey, Store),
+  {Give, Keep} = storage:split(Nkey, Id, Store),
   Npid ! {handover, Give},
   Keep.
 
 % Lägg sätt Key till Value. Om Key inte finns på vår nod, routa meddleandet vidare
 add(Key, Value, Qref, Client, Id, Predecessor, {_, Spid}, Store) ->
   case Predecessor of
-    % TODO: Skriv comment
+    % Om vi inte har någon Predecessor är vi antingen den första noden i ringen, eller så
+    % håller vi på å stabiliserar oss.
+    % Lägg till alla nycklar lokalt och ge bort dem när vi stabiliserar oss om de inte tillhör oss.
     nil ->
-      Spid ! {set_key, Key, Value, Qref, Client},
-      Store;
+      Store2 = storage:add(Key, Value, Store),
+      Client ! {Qref, ok, Id},
+      Store2;
 
     % Om Key är mellan vår Key och vår Predecessors Key är det vårt ansvar. Lägg till den lokalt
     % Om den inte är det, routa vidare till vår Successor.
@@ -146,7 +167,6 @@ lookup(Key, Qref, Client, Id, Predecessor, Successor, Store) ->
       % Om Key är mellan vår Key och vår Predecessors Key är det vårt ansvar. Hämta den från
       % den lokala Store:en
       % Om den inte är det, routa vidare till vår Successor.
-
       case key:between(Key, Pkey, Id) of
         true ->
           Result = storage:lookup(Key, Store),
@@ -159,68 +179,66 @@ lookup(Key, Qref, Client, Id, Predecessor, Successor, Store) ->
 
 % Skapa en "probe", ett meddelande som tar ett varv i ringen och samlar data om vår overlay
 % Tagga den med vår Key så att vi vet när den är tillbaka ifall flera probes är på gång
-create_probe(Id, {Skey, Spid}) ->
-  io:format("Sending probe to from ~p to ~p~n", [Id, Skey]),
-  Spid ! {probe, Id, [Id], erlang:now()}.
+create_probe(Id, {Skey, Spid}, {Pkey, _}, Store) ->
+  Spid ! {probe, Id, [{Id, Skey, Pkey, Store}], erlang:now()}.
 
 % Skicka vidare en probe, med vårt Key tillagd till Nodes
-forward_probe(Ref, T, Nodes, Id, {Skey, Spid}) ->
-  timer:sleep(500),
-  % io:format("~p: Forwarding probe originating from ~p to ~p~n", [Id, Ref, Skey]),
-  Spid ! {probe, Ref, [Id|Nodes], T}.
+forward_probe(Ref, T, Nodes, Id, {Skey, Spid}, {Pkey, _}, Store) ->
+  Spid ! {probe, Ref, [{Id, Skey, Pkey, Store}|Nodes], T}.
 
 % Printa ut innehållet i proben och skicka inte vidare.
 remove_probe(T, Nodes) ->
-  io:format("Received probe after ~p seconds, going through ~p~n", [T, Nodes]).
+  io:format("Received probe:~n"),
+  print_node_entry(Nodes),
+  io:format("~n").
 
-% Helt onödig?
-request(Peer, Predecessor) ->
-  case Predecessor of
-    nil ->
-      Peer ! {status, nil};
-    {Pkey, Ppid} ->
-      Peer ! {status, {Pkey, Ppid}}
-  end.
+print_node_entry([]) ->
+  ok;
+print_node_entry([{Id, Successor, Predecessor, Store}|Entries]) ->
+  io:format("Probed ~p: succ: ~p, pred: ~p, store: ~p~n", [Id, Successor, Predecessor, Store]),
+  print_node_entry(Entries).
 
-stabilize({Skey, Spid}) ->
-  Spid ! {request, self()},
-  {Skey, Spid}.
 
-% Dude, where's my car?
-stabilize(Pred, Id, Successor) ->
+% This is where the magic happens
+% Stabilisera vår plats i ringen genom att korrigera vem vår Successor är, baserat på vem vår nuvarande Successors
+% Predecessor är.
+% Om vår Successors Predecessor är oss själva har vi stabiliserat oss i ringen och allt är soft.
+% Om vår Successors Predecessor är emellan oss och vår Successor är vi på fel plats i ringen och måste stega bakåt.
+% Om vår Successors Predecessor inte är oss själva, men vi är emellan Successorn och dess Predecessor måste vi berätta
+% att vi är Successorns nya Predecessor.
+stabilize(SuccPred, Id, Successor) ->
   {Skey, Spid} = Successor,
-  case Pred of
-    % We're the second node entering the ring
-    % Why can this happen?
+  case SuccPred of
+    % Vår Successor har ingen predecessor, vi är antaglingen den enda noden i ringen och pratar med oss själva,
+    % eller så är vi nr 2 in i ringen.
     nil ->
-      % io:format("~p: notifying ~p that we're its new predecessor (nil)~n", [Id, Skey]),
       Spid ! {notify, {Id, self()}},
       Successor;
 
-    % We're stabilized, our successors predecessor is us
+    % Vi har stabiliserat oss, vi är vår Successors Predecessor, allt är frid och fröjd. Gör inget
     {Id, _} ->
       Successor;
 
-    % We're the second node entering the ring
+    % Vår Successor har sig själv som predecessor, vi är förmodligen nr 2 in i ringen.
     {Skey, _} ->
-      % io:format("~p: notifying ~p that we're its new predecessor (second)~n", [Id, Skey]),
       Spid ! {notify, {Id, self()}},
       Successor;
 
-    % There is already another predecessor
-    {Pkey, Ppid} ->
+    % Vår successor har redan en annan Predecessor
+    % Om Predecessorns Key ligger mellan vår och vår Successors är vi på
+    % fel plats i ringen och måste stega bakåt genom att sätta Successorns Predecessor som vår Successor.
+    % Om den inte är det ska vi hoppa in i mitten, mellan vår Successor och dess Predecessor
+    {Pkey, _} ->
       case key:between(Pkey, Id, Skey) of
-      % The predecessor of our successor is in between us and our successor. Try stepping backwards in the ring
+        % Vår Successors Predecessor är emellan oss och vår Successor. Stega bakåt i ringen tills vi hittar vår plats
         true ->
-          % io:format("~p: stepping backards to new successor ~p~n", [Id, Pred]),
-          Pred;
+          SuccPred;
 
-      % The predecessor of our successor is behind us, notify our successor that we're its new predecessor
+        % Vår Successors Predecessor är bakom oss i ringen, säg till vår Successor att vi ska hoppa in imellan
+        % som dess nya Predecessor
         false ->
-          % io:format("~p: notifying ~p that we're its new predecessor (~p in between ~p and ~p)~n", [Id, Skey, Id, Pkey, Skey]),
           Spid ! {notify, {Id, self()}},
           Successor
-
       end
   end.
 
@@ -231,7 +249,6 @@ notify({Nkey, Npid}, Id, Predecessor, Store) ->
     % Om vi inte har någon Predecessor är vi den första noden i ringen, ge bort en bit av
     % vår Store och sätt Predecessor till den nya: {Nkey, Npid}
     nil ->
-      % io:format("~p: updating predecessor ~p (nil)~n", [Id, {Nkey, Npid}]),
       Keep = handover(Store, Nkey, Npid, Id),
       {{Nkey, Npid}, Keep};
     {Pkey, _} ->
@@ -239,17 +256,17 @@ notify({Nkey, Npid}, Id, Predecessor, Store) ->
       % Ge bort en bit av vår store och sätt Predecessor
       case key:between(Nkey, Pkey, Id) of
         true ->
-          % io:format("~p: updating predecessor ~p (~p in between ~p and ~p)~n", [Id, {Nkey, Npid}, Nkey, Pkey, Id]),
           Keep = handover(Store, Nkey, Npid, Id),
           {{Nkey, Npid}, Keep};
         false ->
-          % io:format("~p: not updating predecessor ~p~n", [Id, {Nkey, Npid}]),
           {Predecessor, Store}
       end
   end.
 
+% Schemalägg att meddelandet "stabilize" ska skickas till oss själva med intervallet Stabilize
+% (intervallet definieras högst upp i filen)
 schedule_stabilize() ->
-  timer:send_interval(?Stabilize, self(), stabilize).
+  timer:send_interval(round(?Stabilize * ?TimeScale), self(), stabilize).
 
 % Be Pid skicka en probe varannan sekund
 send_probe(Pid) ->
@@ -279,33 +296,34 @@ get_key(Node, Key) ->
     end
   end).
 
+% Testa om saker verkar funka. Skapa 5 noder och lägg till 4 nycklar på olika noder.
+% Försök slå upp de fyra nycklarna, vänta lite, och försök slå upp dem igen
 test() ->
-  random:seed(erlang:now()),                             % Se till så att randomgeneratorn ger unik random för varje körning
-  TimeScale = 1,
+  random:seed(erlang:now()),                             % Se till så att randomgeneratorn ger unik random för varje körning,
   Key1 = key:generate(),
   Key2 = key:generate(),
   Key3 = key:generate(),
   Key4 = key:generate(),
   Node1 = start(key:generate()),
+  spawn(fun() -> send_probe(Node1) end),
   Node2 = start(key:generate(), Node1),
   set_key(Node2, Key1, msg1),
   Node3 = start(key:generate(), Node2),
-  spawn(fun() -> send_probe(Node1) end),
-  timer:sleep(1000 * TimeScale),
+  timer:sleep(round(1000 * ?TimeScale)),
   Node4 = start(key:generate(), Node1),
   set_key(Node3, Key2, msg2),
   Node5 = start(key:generate(), Node3),
   set_key(Node1, Key3, msg3),
-  timer:sleep(1000 * TimeScale),
+  timer:sleep(round(1000 * ?TimeScale)),
   set_key(Node5, Key4, msg4),
-  timer:sleep(2500 * TimeScale),
+  timer:sleep(round(2500 * ?TimeScale)),
   get_key(Node5, Key1),
   get_key(Node3, Key2),
   get_key(Node4, Key3),
   get_key(Node5, Key4),
-  timer:sleep(10000 * TimeScale),
+  timer:sleep(round(10000 * ?TimeScale)),
   get_key(Node5, Key1),
   get_key(Node3, Key2),
   get_key(Node4, Key3),
   get_key(Node5, Key4),
-  timer:sleep(2000 * TimeScale).
+  timer:sleep(round(2000 * ?TimeScale)).
