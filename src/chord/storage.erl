@@ -1,7 +1,7 @@
 -module(storage).
 
 %% API
--export([create/0, add/3, lookup/2, merge/2, split/2, test/0]).
+-export([create/0, add/3, lookup/2, merge/2, split/3, test/0]).
 
 create() ->
   [].
@@ -12,18 +12,20 @@ add(Key, Value, Store) ->
 lookup(Key, Store) ->
   lists:keyfind(Key, 1, Store).
 
-split(Key, Store) ->
-  split(Key, Store, [], []).
+% Dela en Store i två delar, en med alla nycklar som inte är mellan SplitFrom och SplitTo, och en som är alla
+% nycklar som är emellan.
+split(SplitFrom, SplitTo, Store) ->
+  split(SplitFrom, SplitTo, Store, [], []).
 
-split(_, [], Lower, HigherOrEqual) ->
-  {Lower, HigherOrEqual};
+split(_, _, [], NotBetween, Between) ->
+  {NotBetween, Between};
 
-split(SplitKey, [{Key, Value}|Store], Lower, HigherOrEqual) ->
-  case Key < SplitKey of
-    true ->
-      split(SplitKey, Store, [{Key, Value}|Lower], HigherOrEqual);
+split(SplitFrom, SplitTo, [{Key, Value}|Store], NotBetween, Between) ->
+  case key:between(Key, SplitFrom, SplitTo) of
     false ->
-      split(SplitKey, Store, Lower, [{Key, Value}|HigherOrEqual])
+      split(SplitFrom, SplitTo, Store, [{Key, Value}|NotBetween], Between);
+    true ->
+      split(SplitFrom, SplitTo, Store, NotBetween, [{Key, Value}|Between])
   end.
 
 merge(Store1, Store2) ->
@@ -37,7 +39,7 @@ test() ->
   Store5 = add(8, 0, Store4),
   Store6 = add(7, 0, Store5),
   Store7 = add(1, 0, Store6),
-  io:format("~p~n", [split(0, Store7)]),
-  io:format("~p~n", [split(5, Store7)]),
-  io:format("~p~n", [split(8, Store7)]),
-  io:format("~p~n", [split(35, Store7)]).
+  io:format("~p~n", [split(0, 3, Store7)]),
+  io:format("~p~n", [split(5, 2, Store7)]),
+  io:format("~p~n", [split(8, 6, Store7)]),
+  io:format("~p~n", [split(35, 69, Store7)]).
