@@ -10,8 +10,11 @@ start(Port) ->
   % Printa till stout
   io:format("Spawning server on port: ~p ...~n", [Port]),
 
+  ChordPid = overlay:start(key:generate()),
+  register(chordpeer, ChordPid),
+
   % Starta servern
-  server_start(Port).
+  spawn(fun() -> server_start(Port) end).
 
 ver() ->
   "1".
@@ -48,15 +51,21 @@ server_parse(Data) ->
 
 % Svara med ett HTTP 200 med innehållet i filen om filen finns. Annars returnera 404 (eller 500 om det går åt pepparn)
 reply({{get, {URL, Args}, _}, _, _}) ->
-  timer:sleep(40),
   [_|LocalURL] = URL, % Plocka bort första tecknet (en slash) från urlen
-  case file:read_file(LocalURL) of
-    {ok, Binary} ->
-      http:ok(Binary);
-    {error, enoent} ->
-      http:not_found(URL ++ " was not found");
-    {error, _} ->
-      http:internal_server_error()
+
+  Qref = make_ref(), % Skapa ett unikt ID på vår request, så att vi kan skriva ut rätt svar när det kommer
+  chordpeer ! {get_key, key:hexhash(LocalURL), Qref, self()},
+  receive % Vänta på svaret och skriv ut det när det kommer
+    {Qref, Result, Nkey} ->
+      io:format("Lookup for ~p on ~p: ~p~n", [LocalURL, Nkey, Result]),
+      case Result of
+        false ->
+          http:not_found("File nout found: " ++ LocalURL);
+        {_, Res} ->
+          http:ok(Res)
+      end
+  after 3000 ->
+    http:ok("Sorry timeout!")
   end.
 
 % Läs data från socketen tills vi får en "\r\n\r\n"-sekvens, eller andra sidan stänger kopplingen
