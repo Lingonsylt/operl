@@ -1,0 +1,13 @@
+# Shell nr1:
+cd src/example
+erlc pingpong.erl && erl -sname node1 -setcookie secret
+
+(node1@<datornamn>)> pingpong:start_pong(). # Istället för localhost kan datornamn behövas
+
+# Shell nr2:
+cd src/example
+erlc pingpong.erl && erl -sname node2 -setcookie secret
+
+# Ersätt <datornamn> med ditt datornamn
+net_adm:ping(node1@<datornamn>).  # Ska returnera "pong", inte "pang"
+(node2@<datornamn>)> pingpong:start_ping(node1@<datornamn>).
