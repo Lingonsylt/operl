@@ -1,5 +1,5 @@
 -module(server).
--export([start/1,run/1,ver/0,server_start/1, server_handle/1]).
+-export([start/1,run/1,ver/0,server_start/1, server_handle/1, test/0]).
 
 % Parse:a första command-line-argumentet som en int och passa till start/0
 run([PortString|_]) ->
@@ -15,6 +15,10 @@ start(Port) ->
 
   % Starta servern
   spawn(fun() -> server_start(Port) end).
+
+test() ->
+  server:start(8080),
+  overlay:set_key(chordpeer, key:hexhash("hello.txt"), "Hello Mr. World!").
 
 ver() ->
   "1".
