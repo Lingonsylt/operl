@@ -1,5 +1,5 @@
 -module(server).
--export([start/1,run/1,ver/0,server_start/1, server_handle/1, test/0]).
+-export([start/1,run/1,ver/0,server_start/1, server_handle/1, test/0, serv/0]).
 
 % Parse:a första command-line-argumentet som en int och passa till start/0
 run([PortString|_]) ->
@@ -10,15 +10,29 @@ start(Port) ->
   % Printa till stout
   io:format("Spawning server on port: ~p ...~n", [Port]),
 
-  ChordPid = overlay:start(key:generate()),
+  random:seed(erlang:now()),
+  ChordPid = overlay:start(key:generate(), {chordpeer, 'node1@172.16.16.147'}),
   register(chordpeer, ChordPid),
 
   % Starta servern
   spawn(fun() -> server_start(Port) end).
 
-test() ->
-  server:start(8080),
+serv() ->
+  % Printa till stout
+  % server:start(8080),
+
+  io:format("Spawning server on port: ~p ...~n", [8080]),
+
+  random:seed(erlang:now()),
+  ChordPid = overlay:start(key:generate()),
+  register(chordpeer, ChordPid),
+  spawn(fun() -> server_start(8080) end),
+
   overlay:set_key(chordpeer, key:hexhash("hello.txt"), "Hello Mr. World!").
+
+
+test() ->
+  server:start(8080).
 
 ver() ->
   "1".
