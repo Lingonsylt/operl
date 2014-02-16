@@ -180,7 +180,12 @@ lookup(Key, Qref, Client, Id, Predecessor, Successor, Store) ->
 % Skapa en "probe", ett meddelande som tar ett varv i ringen och samlar data om vår overlay
 % Tagga den med vår Key så att vi vet när den är tillbaka ifall flera probes är på gång
 create_probe(Id, {Skey, Spid}, {Pkey, _}, Store) ->
-  Spid ! {probe, Id, [{Id, Skey, Pkey, Store}], erlang:now()}.
+  io:format("create_probe: ~p", [{probe, Id, [{Id, Skey, Pkey, Store}], erlang:now()}]),
+  Spid ! {probe, Id, [{Id, Skey, Pkey, Store}], erlang:now()};
+
+create_probe(Id, {Skey, Spid}, Predecessor, Store) ->
+  io:format("create_probe: ~p", [{probe, Id, [{Id, Skey, Predecessor, Store}], erlang:now()}]),
+  Spid ! {probe, Id, [{Id, Skey, Predecessor, Store}], erlang:now()}.
 
 % Skicka vidare en probe, med vårt Key tillagd till Nodes
 forward_probe(Ref, T, Nodes, Id, {Skey, Spid}, {Pkey, _}, Store) ->
